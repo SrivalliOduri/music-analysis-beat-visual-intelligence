@@ -127,6 +127,7 @@ small { color: #c6cbe2; }
     {% if audio_url %}
     <div class="results">
         <h2>Your Song</h2>
+        <p><strong>File:</strong> {{ song_name }}</p>
 
         <audio id="player" controls>
             <source src="{{ audio_url }}" type="{{ audio_type }}">
@@ -391,42 +392,74 @@ def allowed_file(filename):
     )
 
 
+
 def generate_suggestions(bpm, beat_count, duration):
     suggestions = []
 
     if bpm < 70:
         suggestions.append(
-            "Your track has a slow estimated tempo. "
-            "If you want a more energetic feel, experiment with a faster tempo."
+            f"The estimated tempo is {bpm} BPM, which is relatively slow. "
+            "If you want a more energetic track, experiment with a faster "
+            "tempo or add rhythmic percussion."
         )
-    elif bpm <= 110:
+    elif bpm < 100:
         suggestions.append(
-            "Your track has a moderate estimated tempo. "
-            "Try adjusting the arrangement or percussion to change its energy."
+            f"The estimated tempo is {bpm} BPM. Try adding percussion "
+            "or syncopated rhythms if you want more movement."
+        )
+    elif bpm < 130:
+        suggestions.append(
+            f"The estimated tempo is {bpm} BPM, a moderate-to-fast tempo. "
+            "Experiment with rhythmic accents and arrangement changes "
+            "to give different sections more contrast."
         )
     else:
         suggestions.append(
-            "Your track has a relatively fast estimated tempo. "
-            "Experiment with drum patterns and rhythmic accents."
+            f"The estimated tempo is {bpm} BPM, which is relatively fast. "
+            "Try simplifying busy drum patterns or using contrasting "
+            "slower sections if the track feels too intense."
         )
 
-    if duration > 0 and beat_count / duration < 1:
+    if duration > 0:
+        beats_per_second = beat_count / duration
+
+        if beats_per_second < 0.8:
+            suggestions.append(
+                "Few beats were detected relative to the track duration. "
+                "Check the timestamps manually; the beat detector may have "
+                "missed beats in quieter or less rhythmic sections."
+            )
+        elif beats_per_second > 2.5:
+            suggestions.append(
+                "Many beats were detected per second. Check the timestamps "
+                "against playback to see whether subdivisions were detected "
+                "instead of the main beats."
+            )
+        else:
+            suggestions.append(
+                f"The detector found about {beats_per_second:.2f} beats "
+                "per second on average. Compare the timestamps with the "
+                "audio to assess beat-detection accuracy."
+            )
+
+    if duration < 60:
         suggestions.append(
-            "The detector found fewer than one beat per second on average. "
-            "Listen to the beat timestamps to check whether detection looks accurate."
+            "This is a short track or audio excerpt. Analyse a longer "
+            "section to assess how the rhythm behaves across the song."
         )
-    elif duration > 0:
+    elif duration >= 180:
         suggestions.append(
-            "Review the detected beat timestamps against the audio playback "
-            "to assess how accurately the beats are identified."
+            "This is a longer track. Compare different sections separately "
+            "to identify possible changes in rhythm and arrangement."
         )
 
     suggestions.append(
-        "These are general, rule-based suggestions from estimated tempo "
-        "and beat statistics, not recommendations from a trained ML model."
+        "These suggestions use estimated tempo, beat density and duration. "
+        "They are rule-based and do not come from a trained ML model."
     )
 
     return suggestions
+
 
 
 def analyse_audio(filepath):
@@ -514,6 +547,7 @@ def home():
         audio_url=audio_url,
         audio_type=audio_type,
         results=results,
+        song_name=filename if audio_url else None,
     )
 
 
