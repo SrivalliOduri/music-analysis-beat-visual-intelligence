@@ -144,6 +144,35 @@ small { color: #c6cbe2; }
         <h3>Beat Timestamps (seconds)</h3>
         <div class="timestamps">{{ results.timestamps }}</div>
 
+<h3>Audio Feature Analysis</h3>
+
+<div style="text-align: left; color: #d5d8ed;">
+    <p>
+        <strong>Average RMS Energy:</strong>
+        {{ results.rms_energy }}
+    </p>
+
+    <p>
+        <strong>Spectral Centroid:</strong>
+        {{ results.spectral_centroid_hz }} Hz
+    </p>
+
+    <p>
+        <strong>Zero-Crossing Rate:</strong>
+        {{ results.zero_crossing_rate }}
+    </p>
+
+    <p>
+        <strong>Energy Level:</strong>
+        {{ results.energy_description }}
+    </p>
+
+    <p>
+        <strong>Spectral Brightness:</strong>
+        {{ results.brightness_description }}
+    </p>
+</div>
+
         <h3>Music Improvement Suggestions</h3>
         <ul class="suggestions">
             {% for suggestion in results.suggestions %}
@@ -462,12 +491,14 @@ def generate_suggestions(bpm, beat_count, duration):
 
 
 
+
 def analyse_audio(filepath):
     y, sr = librosa.load(filepath, sr=22050, mono=True)
 
     if len(y) == 0:
         raise ValueError("Empty audio file")
 
+    # Tempo and beat detection
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
 
@@ -475,6 +506,32 @@ def analyse_audio(filepath):
     duration = round(len(y) / sr, 2)
     bpm_rounded = round(bpm, 1)
     beat_count = len(beat_times)
+
+    # Audio features
+    rms = librosa.feature.rms(y=y)[0]
+    spectral_centroid = librosa.feature.spectral_centroid(
+        y=y, sr=sr
+    )[0]
+    zero_crossing_rate = librosa.feature.zero_crossing_rate(y)[0]
+
+    rms_mean = float(np.mean(rms))
+    centroid_mean = float(np.mean(spectral_centroid))
+    zcr_mean = float(np.mean(zero_crossing_rate))
+
+    # Basic interpretations of the measured features
+    if rms_mean < 0.05:
+        energy_description = "Low average signal energy"
+    elif rms_mean < 0.15:
+        energy_description = "Moderate average signal energy"
+    else:
+        energy_description = "High average signal energy"
+
+    if centroid_mean < 1500:
+        brightness_description = "Darker spectral character"
+    elif centroid_mean < 3000:
+        brightness_description = "Moderate spectral brightness"
+    else:
+        brightness_description = "Brighter spectral character"
 
     return {
         "bpm": bpm_rounded,
@@ -486,10 +543,16 @@ def analyse_audio(filepath):
         "beat_times": [
             round(float(t), 3) for t in beat_times
         ],
+        "rms_energy": round(rms_mean, 4),
+        "spectral_centroid_hz": round(centroid_mean, 2),
+        "zero_crossing_rate": round(zcr_mean, 4),
+        "energy_description": energy_description,
+        "brightness_description": brightness_description,
         "suggestions": generate_suggestions(
             bpm_rounded, beat_count, duration
         ),
     }
+
 
 
 @app.route("/", methods=["GET", "POST"])
