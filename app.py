@@ -23,9 +23,7 @@ REFERENCE_PATH = BASE_DIR / "dataset" / "deam_song_level_features.csv"
 
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 MAX_FILE_BYTES = 20 * 1024 * 1024
-# Allow two files in the comparison form while keeping each file limited to 20 MB.
 app.config["MAX_CONTENT_LENGTH"] = 2 * MAX_FILE_BYTES
-
 
 HTML = """
 <!DOCTYPE html>
@@ -126,6 +124,7 @@ body{padding:10px}
 <a class="nav-link" href="#analysis">Analysis</a>
 <a class="nav-link" href="#visualizer-section">Visualizer</a>
 <a class="nav-link" href="#compare">Compare</a>
+<a class="nav-link" href="#history">History</a>
 <a class="nav-link" href="#insights">Insights</a>
 <a class="nav-link" href="#about">About</a>
 </div>
@@ -156,6 +155,8 @@ body{padding:10px}
 </audio>
 
 <h2>Music Analysis Results</h2>
+<button id="saveAnalysis" type="button">Save This Analysis</button>
+<p id="saveStatus" aria-live="polite"></p>
 <p>Estimated Tempo</p>
 <div class="bpm">{{ results.bpm }} BPM</div>
 
@@ -174,10 +175,7 @@ body{padding:10px}
 <div class="grid">
 <div class="card"><strong>Predicted Valence</strong>{{ results.emotion.valence }} / 9</div>
 <div class="card"><strong>Predicted Arousal</strong>{{ results.emotion.arousal }} / 9</div>
-<div class="card">
-<strong>Estimated Audio Profile</strong>
-{{ results.emotion.mood }}
-</div>
+<div class="card"><strong>Estimated Audio Profile</strong>{{ results.emotion.mood }}</div>
 <div class="card">
 <strong>Feature Compatibility Check</strong>
 {{ results.emotion.reliability }}<br>
@@ -199,10 +197,7 @@ body{padding:10px}
 <p>Use these analysis-based suggestions to explore possible improvements to your arrangement.</p>
 <ol>
 {% for step in results.development_pathway %}
-<li>
-<strong>{{ step.title }}</strong><br>
-{{ step.detail }}
-</li>
+<li><strong>{{ step.title }}</strong><br>{{ step.detail }}</li>
 {% endfor %}
 </ol>
 <p><small>To check a revision with numbers, use <a class="nav-link" href="#compare" style="display:inline;padding:2px 6px">Compare Two Versions</a>.</small></p>
@@ -212,8 +207,9 @@ body{padding:10px}
 <h2>Live Beat-Responsive Visualizer</h2>
 <p>Enable live visuals and play your song to animate the patterns with its sound and detected beats.</p>
 <canvas id="visualizer"></canvas>
-<p><small>Visuals respond to audio frequencies, intensity and detected beats.</small></p>
-<button id="visualButton" type="button">Enable Live Visuals</button>
+<p><small>Track visuals use the audio frequencies and the beat timestamps detected by the analysis. Microphone visuals respond to live frequencies and intensity.</small></p>
+<button id="visualButton" type="button">Enable Track Visuals</button>
+<button id="micButton" type="button">Start Microphone Visuals</button>
 <p id="visualStatus">Enable visuals, then play your song.</p>
 
 <h3>Signal Timeline (click to jump)</h3>
@@ -222,7 +218,6 @@ body{padding:10px}
 <p id="agreement"></p>
 <h3>Reference Events (from the signal envelope)</h3>
 <div id="refEvents" class="timestamps">No reference events found.</div>
-
 <h3>Live Audio Event Timeline</h3>
 <p id="eventStatus">Play your song to detect intensity changes.</p>
 <div id="eventLog" class="timestamps">No events detected yet.</div>
@@ -264,6 +259,13 @@ body{padding:10px}
 {% endif %}
 </section>
 
+<section id="history" class="panel">
+<h2>Saved Analysis History</h2>
+<p>Save analyses in this browser to revisit their key measurements. History is stored locally in this browser and is not uploaded to the server.</p>
+<button id="clearHistory" type="button">Clear History</button>
+<div id="historyList" class="timestamps">No saved analyses yet.</div>
+</section>
+
 <section id="about" class="panel">
 <h2>About SONIQ</h2>
 <p>SONIQ explores music through rhythm detection, acoustic feature analysis, emotion estimation and beat-responsive visualisation.</p>
@@ -273,30 +275,275 @@ body{padding:10px}
 </div>
 
 <script>
+
+(function () {
+  const historyKey = "soniq-analysis-history-v2";
+
+  const saveButton = document.getElementById("saveAnalysis");
+  const saveStatus = document.getElementById("saveStatus");
+  const historyList = document.getElementById("historyList");
+  const clearButton = document.getElementById("clearHistory");
+
+  const resultsPanel =
+    document.getElementById("analysis") ||
+    document.querySelector(".analysis-results");
+
+  const player = document.getElementById("player");
+
+  function readHistory() {
+    try {
+      const items = JSON.parse(
+        localStorage.getItem(historyKey) || "[]"
+      );
+      return Array.isArray(items) ? items : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function renderHistory() {
+    if (!historyList) return;
+
+    const items = readHistory();
+    historyList.replaceChildren();
+
+    if (!items.length) {
+      historyList.textContent = "No saved analyses yet.";
+      return;
+    }
+
+    items.forEach((entry, index) => {
+      const wrap = document.createElement("div");
+      wrap.style.cssText =
+        "padding:12px 0;border-bottom:1px solid rgba(216,237,218,.14)";
+
+      const title = document.createElement("strong");
+      title.textContent =
+        (entry.name || "Audio") + " — " + (entry.savedAt || "");
+
+      const details = document.createElement("p");
+      details.textContent =
+        `${entry.bpm} BPM · ${entry.duration}s · ` +
+        `${entry.beatCount} beats · Energy ${entry.rms}`;
+
+      const viewButton = document.createElement("button");
+      viewButton.type = "button";
+      viewButton.textContent = "View Analysis";
+
+      viewButton.addEventListener("click", () => {
+        let modal = document.getElementById("historyViewModal");
+
+        if (!modal) {
+          modal = document.createElement("div");
+          modal.id = "historyViewModal";
+          modal.style.cssText = `
+            position:fixed; inset:0; z-index:9999;
+            background:rgba(0,0,0,.85); overflow:auto;
+            padding:24px; box-sizing:border-box;
+          `;
+
+          const content = document.createElement("div");
+          content.id = "historyViewContent";
+          content.style.cssText = `
+            max-width:850px; margin:30px auto; padding:24px;
+            border-radius:14px; background:#142019;
+            color:#e8f5e9; overflow-wrap:anywhere;
+          `;
+
+          const closeButton = document.createElement("button");
+          closeButton.type = "button";
+          closeButton.textContent = "Close";
+          closeButton.addEventListener("click", () => modal.remove());
+
+          content.appendChild(closeButton);
+          modal.appendChild(content);
+
+          modal.addEventListener("click", (event) => {
+            if (event.target === modal) modal.remove();
+          });
+
+          document.body.appendChild(modal);
+        }
+
+        const content = modal.querySelector("#historyViewContent");
+
+        // Keep the Close button, then rebuild the saved analysis view.
+        content.replaceChildren();
+
+        const closeButton = document.createElement("button");
+        closeButton.type = "button";
+        closeButton.textContent = "Close";
+        closeButton.addEventListener("click", () => modal.remove());
+        content.appendChild(closeButton);
+
+        const heading = document.createElement("h2");
+        heading.textContent = entry.name || "Saved Analysis";
+        content.appendChild(heading);
+
+        const savedDate = document.createElement("p");
+        savedDate.textContent = "Saved: " + (entry.savedAt || "Unknown");
+        content.appendChild(savedDate);
+
+        const summary = document.createElement("p");
+        summary.textContent =
+          `BPM: ${entry.bpm} | Duration: ${entry.duration}s | ` +
+          `Beats: ${entry.beatCount} | Energy: ${entry.rms}`;
+        content.appendChild(summary);
+
+        if (entry.snapshot) {
+          const snapshot = document.createElement("div");
+          snapshot.innerHTML = entry.snapshot;
+          content.appendChild(snapshot);
+        } else {
+          const note = document.createElement("p");
+          note.textContent =
+            "This saved entry contains summary details only. " +
+            "Run the analysis again to view the complete results.";
+          content.appendChild(note);
+        }
+
+        if (entry.audioUrl) {
+          const audio = document.createElement("audio");
+          audio.controls = true;
+          audio.src = entry.audioUrl;
+          audio.style.cssText = "width:100%;margin-top:16px";
+          content.appendChild(audio);
+        }
+      });
+
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.textContent = "Delete";
+
+      removeButton.addEventListener("click", () => {
+        const next = readHistory();
+        next.splice(index, 1);
+
+        try {
+          localStorage.setItem(historyKey, JSON.stringify(next));
+          renderHistory();
+        } catch (e) {
+          if (saveStatus) {
+            saveStatus.textContent = "Could not update saved history.";
+          }
+        }
+      });
+
+      wrap.append(title, details, viewButton, removeButton);
+      historyList.appendChild(wrap);
+    });
+  }
+
+  if (saveButton) {
+    saveButton.addEventListener("click", () => {
+      let data = {};
+
+      try {
+        data = JSON.parse(
+          document.getElementById("music-analysis-data")?.textContent || "{}"
+        );
+      } catch (e) {
+        if (saveStatus) {
+          saveStatus.textContent = "Could not read the analysis data.";
+        }
+        return;
+      }
+
+      const fileElement = document.querySelector(
+        "#analysis + .panel p strong"
+      );
+
+      const entry = {
+        name:
+          fileElement?.parentElement?.textContent
+            ?.replace("File:", "")
+            .trim() || "Uploaded track",
+        savedAt: new Date().toLocaleString(),
+        bpm: data.bpm ?? "n/a",
+        duration: data.duration ?? "n/a",
+        beatCount: data.beat_count ?? "n/a",
+        rms: data.rms_energy ?? "n/a",
+        audioUrl: player?.currentSrc || "",
+        snapshot: resultsPanel?.innerHTML || ""
+      };
+
+      const items = readHistory();
+      items.unshift(entry);
+
+      try {
+        localStorage.setItem(
+          historyKey,
+          JSON.stringify(items.slice(0, 20))
+        );
+
+        renderHistory();
+
+        if (saveStatus) {
+          saveStatus.textContent = "Analysis saved in this browser.";
+        }
+      } catch (e) {
+        if (saveStatus) {
+          saveStatus.textContent =
+            "Could not save history. Browser storage may be full.";
+        }
+      }
+    });
+  }
+
+  if (clearButton) {
+    clearButton.addEventListener("click", () => {
+      if (!confirm("Clear all saved analyses?")) return;
+
+      localStorage.removeItem(historyKey);
+      renderHistory();
+
+      if (saveStatus) {
+        saveStatus.textContent = "Saved history cleared.";
+      }
+    });
+  }
+
+  renderHistory();
+})();
+
+
 const player=document.getElementById("player");
 const canvas=document.getElementById("visualizer");
 const button=document.getElementById("visualButton");
+const micButton=document.getElementById("micButton");
 const statusText=document.getElementById("visualStatus");
 
-if(player && canvas && button){
+if(canvas && button){
  const ctx=canvas.getContext("2d");
  let data={};
 
- try{
-   data=JSON.parse(document.getElementById("music-analysis-data").textContent||"{}");
- }catch(e){console.error(e);}
+ try {
+   data=JSON.parse(document.getElementById("music-analysis-data")?.textContent||"{}");
+ } catch(e) {
+   console.error(e);
+ }
 
  const beats=Array.isArray(data.beat_times)?data.beat_times:[];
  const refEvents=Array.isArray(data.intensity_events)?data.intensity_events:[];
  const curve=Array.isArray(data.rms_curve)?data.rms_curve:[];
- let audioContext,analyser,source,frequencyData;
- let enabled=false,phase=0,pulse=0,lastBeat=-1;
+
+ let audioContext=null;
+ let analyser=null;
+ let trackSource=null;
+ let micSource=null;
+ let micStream=null;
+ let frequencyData=null;
+ let enabled=false;
+ let micMode=false;
+ let pulse=0;
+ let lastBeat=-1;
  let energyHistory=[];
  let intensityMode="normal";
  let modeHold=0;
  let intensityEvents=[];
  let lastEventTime=-10;
- let liveTotal=0,liveMatches=0;
+ let liveTotal=0;
+ let liveMatches=0;
 
  const eventLog=document.getElementById("eventLog");
  const eventStatus=document.getElementById("eventStatus");
@@ -311,27 +558,32 @@ if(player && canvas && button){
  }
 
  function totalDuration(){
-   return (player.duration&&isFinite(player.duration))?player.duration:(data.duration||1);
+   return player && player.duration && isFinite(player.duration)
+     ?player.duration:(data.duration||1);
  }
 
  function seekTo(time){
+   if(!player)return;
    player.currentTime=time;
    player.play().catch(()=>{});
  }
 
  function updateAgreement(){
-   const onset=(typeof data.beat_onset_agreement==="number")
-     ?`${(data.beat_onset_agreement*100).toFixed(0)}% of detected beats fall within 70 ms of an onset peak (note: the beat tracker and this check both use the onset envelope, so this is a consistency check, not independent proof).`
+   const onset=typeof data.beat_onset_agreement==="number"
+     ?`${(data.beat_onset_agreement*100).toFixed(0)}% of detected beats fall within 70 ms of an onset peak. This is a consistency check, not independent proof.`
      :"";
+
    const live=liveTotal>0
      ?`Live detector vs reference: ${liveMatches} of ${liveTotal} live events fall inside a reference region of the same type (±1 s). `
-     :"Live detector vs reference: play the song with live visuals enabled to compute agreement. ";
+     :"Live detector vs reference: play the song with track visuals enabled to compute agreement. ";
+
    if(agreementText)agreementText.textContent=live+onset;
  }
 
  function buildRefList(){
    if(!refList||!refEvents.length)return;
    refList.replaceChildren();
+
    for(const ev of refEvents){
      const item=document.createElement("button");
      item.type="button";
@@ -346,8 +598,9 @@ if(player && canvas && button){
  }
 
  function drawTimeline(){
-   if(!timeline)return;
-   const w=timeline.clientWidth,h=timeline.clientHeight;
+   if(!timeline||!player)return;
+   const w=timeline.clientWidth;
+   const h=timeline.clientHeight;
    if(!w||!h)return;
    const tctx=timeline.getContext("2d");
    const total=totalDuration();
@@ -363,9 +616,13 @@ if(player && canvas && button){
 
    tctx.strokeStyle="rgba(182,216,192,.18)";
    tctx.lineWidth=1;
+
    for(const b of beats){
      const x=b/total*w;
-     tctx.beginPath();tctx.moveTo(x,h-10);tctx.lineTo(x,h);tctx.stroke();
+     tctx.beginPath();
+     tctx.moveTo(x,h-10);
+     tctx.lineTo(x,h);
+     tctx.stroke();
    }
 
    if(curve.length>1){
@@ -373,7 +630,8 @@ if(player && canvas && button){
      curve.forEach((v,i)=>{
        const x=i/(curve.length-1)*w;
        const y=h-8-v*(h-24);
-       if(i===0)tctx.moveTo(x,y);else tctx.lineTo(x,y);
+       if(i===0)tctx.moveTo(x,y);
+       else tctx.lineTo(x,y);
      });
      tctx.strokeStyle="#b6d8c0";
      tctx.lineWidth=1.5;
@@ -383,7 +641,10 @@ if(player && canvas && button){
    const px=Math.min(1,player.currentTime/total)*w;
    tctx.strokeStyle="#f2f5ec";
    tctx.lineWidth=2;
-   tctx.beginPath();tctx.moveTo(px,0);tctx.lineTo(px,h);tctx.stroke();
+   tctx.beginPath();
+   tctx.moveTo(px,0);
+   tctx.lineTo(px,h);
+   tctx.stroke();
  }
 
  function recordIntensityEvent(mode,time){
@@ -398,12 +659,14 @@ if(player && canvas && button){
    }
 
    const label=mode==="peak"?"High-intensity peak":"Low-intensity region";
-
    liveTotal++;
-   if(refEvents.some(e=>e.type===mode&&time>=e.start-1&&time<=e.end+1))liveMatches++;
+
+   if(refEvents.some(e=>e.type===mode&&time>=e.start-1&&time<=e.end+1)){
+     liveMatches++;
+   }
    updateAgreement();
 
-   intensityEvents.unshift({time:time,label:label,nearestBeat:nearestBeat});
+   intensityEvents.unshift({time,label,nearestBeat});
    intensityEvents=intensityEvents.slice(0,12);
    eventLog.replaceChildren();
 
@@ -419,8 +682,7 @@ if(player && canvas && button){
    }
 
    if(eventStatus){
-     eventStatus.textContent=
-       `${label} detected at ${formatTime(time)}. Click an event to replay it.`;
+     eventStatus.textContent=`${label} detected at ${formatTime(time)}. Click an event to replay it.`;
    }
  }
 
@@ -450,61 +712,164 @@ if(player && canvas && button){
 
  if(timeline){
    timeline.addEventListener("click",ev=>{
+     if(!player)return;
      const rect=timeline.getBoundingClientRect();
      const total=totalDuration();
      player.currentTime=Math.max(0,Math.min(total,(ev.clientX-rect.left)/rect.width*total));
      drawTimeline();
    });
  }
- player.addEventListener("timeupdate",drawTimeline);
- player.addEventListener("loadedmetadata",drawTimeline);
 
- player.addEventListener("seeked",()=>{
-   // Do not carry the previous section's rolling energy into the new position.
-   energyHistory=[];
-   intensityMode="normal";
-   modeHold=0;
-   pulse=0;
+ if(player){
+   player.addEventListener("timeupdate",drawTimeline);
+   player.addEventListener("loadedmetadata",drawTimeline);
 
-   // Mark the latest beat at/before the seek position so it does not pulse falsely.
-   let beatIndex=-1;
-   while(beatIndex+1<beats.length && beats[beatIndex+1]<=player.currentTime){
-     beatIndex++;
+   player.addEventListener("seeked",()=>{
+     energyHistory=[];
+     intensityMode="normal";
+     modeHold=0;
+     pulse=0;
+
+     let beatIndex=-1;
+     while(beatIndex+1<beats.length&&beats[beatIndex+1]<=player.currentTime){
+       beatIndex++;
+     }
+     lastBeat=beatIndex;
+     lastEventTime=player.currentTime-1;
+     drawTimeline();
+   });
+ }
+
+ async function ensureAudioContext(){
+   if(!audioContext){
+     audioContext=new(window.AudioContext||window.webkitAudioContext)();
+     analyser=audioContext.createAnalyser();
+     analyser.fftSize=256;
+     analyser.smoothingTimeConstant=.72;
+     frequencyData=new Uint8Array(analyser.frequencyBinCount);
    }
-   lastBeat=beatIndex;
-
-   // Re-arm the event cooldown relative to the new playback position.
-   lastEventTime=player.currentTime-1;
-   drawTimeline();
- });
+   await audioContext.resume();
+ }
 
  button.addEventListener("click",async()=>{
    try{
-     if(!audioContext){
-       audioContext=new(window.AudioContext||window.webkitAudioContext)();
-       analyser=audioContext.createAnalyser();
-       analyser.fftSize=256;
-       analyser.smoothingTimeConstant=.72;
-       frequencyData=new Uint8Array(analyser.frequencyBinCount);
-       source=audioContext.createMediaElementSource(player);
-       source.connect(analyser);
-       analyser.connect(audioContext.destination);
+     if(!player){
+       if(statusText)statusText.textContent="Upload a song before enabling track visuals.";
+       return;
      }
 
-     await audioContext.resume();
-     enabled=true;
-     button.disabled=true;
-     button.textContent="Live Visuals Enabled";
-     statusText.textContent="Live visuals enabled. Play your song!";
-     draw();
+     await ensureAudioContext();
+
+     if(micMode){
+       micMode=false;
+       if(micSource){try{micSource.disconnect();}catch(e){}micSource=null;}
+       if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;}
+       if(trackSource){try{trackSource.disconnect();}catch(e){}trackSource=null;}
+     }
+
+     
+if(!trackSource){
+    trackSource=audioContext.createMediaElementSource(player);
+    trackSource.connect(analyser);
+    analyser.connect(audioContext.destination);
+}
+
+if(audioContext.state === "suspended"){
+    await audioContext.resume();
+}
+
+enabled=true;
+button.disabled=true;
+button.textContent="Track Visuals Enabled";
+if(micButton)micButton.textContent="Start Microphone Visuals";
+if(statusText)statusText.textContent="Track visuals enabled. Play your song!";
+draw();
+
    }catch(e){
      console.error(e);
-     statusText.textContent="Could not enable visuals. Refresh and try again.";
+     if(statusText)statusText.textContent="Could not enable visuals. Refresh the page and try again.";
    }
  });
 
+ 
+if (micButton) {
+  micButton.addEventListener("click", async () => {
+    try {
+      await ensureAudioContext();
+
+      if (!micMode) {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error("Microphone API unavailable");
+        }
+
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: true
+        });
+
+        micSource = audioContext.createMediaStreamSource(micStream);
+        micSource.connect(analyser);
+
+        micMode = true;
+        enabled = true;
+        energyHistory = [];
+        intensityMode = "normal";
+        modeHold = 0;
+
+        micButton.textContent = "Stop Microphone Visuals";
+        button.disabled = false;
+        button.textContent = "Switch to Track Visuals";
+
+        if (statusText) {
+          statusText.textContent =
+            "Microphone visuals active. Speak, sing, or play audio near your microphone.";
+        }
+
+        draw();
+
+      } else {
+        micMode = false;
+
+        if (micSource) {
+          try {
+            micSource.disconnect();
+          } catch (e) {}
+          micSource = null;
+        }
+
+        if (micStream) {
+          micStream.getTracks().forEach(track => track.stop());
+          micStream = null;
+        }
+
+        micButton.textContent = "Start Microphone Visuals";
+
+        if (audioContext.state === "suspended") {
+          await audioContext.resume();
+        }
+
+        button.textContent = "Switch to Track Visuals";
+        button.disabled = false;
+
+        if (statusText) {
+          statusText.textContent =
+            "Microphone stopped. Press play to continue your song.";
+        }
+      }
+
+    } catch (e) {
+      console.error(e);
+
+      if (statusText) {
+        statusText.textContent =
+          "Microphone unavailable. Allow microphone permission and try again.";
+      }
+    }
+  });
+}
+
+
  function draw(){
-   if(!enabled)return;
+   if(!enabled||!analyser||!frequencyData)return;
    requestAnimationFrame(draw);
 
    const w=canvas.clientWidth;
@@ -519,20 +884,15 @@ if(player && canvas && button){
 
    if(energyHistory.length>10){
      avg=energyHistory.reduce((a,b)=>a+b,0)/energyHistory.length;
-     variance=energyHistory.reduce(
-       (sum,value)=>sum+(value-avg)**2,0
-     )/energyHistory.length;
+     variance=energyHistory.reduce((sum,value)=>sum+(value-avg)**2,0)/energyHistory.length;
    }
 
    const deviation=Math.sqrt(variance);
    let detectedMode="normal";
 
    if(energyHistory.length>10){
-     if(energy>avg+deviation*0.5){
-       detectedMode="peak";
-     }else if(energy<avg-deviation*0.5){
-       detectedMode="low";
-     }
+     if(energy>avg+deviation*.5)detectedMode="peak";
+     else if(energy<avg-deviation*.5)detectedMode="low";
    }
 
    if(detectedMode===intensityMode){
@@ -544,20 +904,16 @@ if(player && canvas && button){
        intensityMode=detectedMode;
        modeHold=0;
 
-       if(!player.paused &&
-          intensityMode!=="normal" &&
-          intensityMode!==previousMode){
+       if(!micMode&&player&&!player.paused&&intensityMode!=="normal"&&intensityMode!==previousMode){
          recordIntensityEvent(intensityMode,player.currentTime);
        }
      }
    }
 
    energyHistory.push(energy);
-   if(energyHistory.length>120){
-     energyHistory.shift();
-   }
+   if(energyHistory.length>120)energyHistory.shift();
 
-   if(!player.paused&&!player.ended){
+   if(!micMode&&player&&!player.paused&&!player.ended){
      let i=0;
      while(i<beats.length&&beats[i]<=player.currentTime)i++;
      const current=i-1;
@@ -568,15 +924,9 @@ if(player && canvas && button){
    }
 
    pulse*=.91;
-   phase+=.012+energy*.0003;
-
-   const intensity=energy/255;
-   const hue=intensityMode==="peak"?25:
-     intensityMode==="low"?220:135;
-
+   const hue=intensityMode==="peak"?25:intensityMode==="low"?220:135;
    const modeLabel=intensityMode==="peak"?"HIGH INTENSITY PEAK":
      intensityMode==="low"?"LOW INTENSITY":"STEADY INTENSITY";
-
    const modeColor=intensityMode==="peak"?"#ff9b54":
      intensityMode==="low"?"#79aaff":"#b6d8c0";
 
@@ -584,7 +934,7 @@ if(player && canvas && button){
    ctx.fillRect(0,0,w,h);
    ctx.fillStyle=modeColor;
    ctx.font="bold 12px system-ui";
-   ctx.fillText(modeLabel,14,22);
+   ctx.fillText(micMode?"MICROPHONE VISUALS · "+modeLabel:modeLabel,14,22);
 
    const radius=35+energy*.65+pulse*35;
    const cx=w/2;
@@ -605,7 +955,6 @@ if(player && canvas && button){
      const value=frequencyData[i]||0;
      const bh=value/255*h*.38;
      const barIntensity=value/255;
-
      const barHue=intensityMode==="peak"?25-barIntensity*12:
        intensityMode==="low"?220-barIntensity*15:
        135-barIntensity*25;
@@ -630,8 +979,9 @@ document.querySelectorAll(".nav-link").forEach(link=>{
 
 const compareModeSelect=document.getElementById("compareMode");
 const intentWrap=document.getElementById("intentWrap");
+
 function updateIntentVisibility(){
- if(compareModeSelect && intentWrap){
+ if(compareModeSelect&&intentWrap){
    intentWrap.hidden=compareModeSelect.value!=="revision";
  }
 }
@@ -648,8 +998,6 @@ if(location.pathname==="/compare"){
 </body>
 </html>
 """
-
-
 INTENTS = {
     "none": ("No specific intent (just show the changes)", None),
     "more_energy": ("I intended to increase signal energy (RMS +5% or more)",
@@ -836,11 +1184,7 @@ def load_emotion_assets():
 
 
 def extract_emotion_features(filepath):
-    """Rebuild the model's feature vector (1 x N DataFrame, not yet imputed).
-
-    This is an approximation of the DEAM feature pipeline and is NOT validated
-    as equivalent. Use ml/validate_inference.py to measure the agreement.
-    """
+    """Approximate the model's feature vector. Pipeline equivalence is not validated."""
     assets = load_emotion_assets()
     feature_columns = assets["feature_columns"]
     metadata_by_name = assets["metadata_by_name"]
@@ -892,7 +1236,6 @@ def extract_emotion_features(filepath):
             + ", ".join(missing_descriptors[:5])
         )
 
-    # Approximate window-based features; not guaranteed to reproduce DEAM extraction.
     frames_per_window = 50
     window_ids = np.arange(len(frames)) // frames_per_window
     window_stats = []
@@ -962,7 +1305,6 @@ def predict_emotion(filepath):
     assets = load_emotion_assets()
     X = extract_emotion_features(filepath)
 
-    # Feature-range diagnostic; it does not prove pipeline equivalence.
     current = X.iloc[0]
     lower, upper = assets["lower"], assets["upper"]
     comparable = current.notna() & lower.notna() & upper.notna()
@@ -972,7 +1314,6 @@ def predict_emotion(filepath):
     outside_pct = 100 * outside_count / checked if checked else 100.0
     imputed = int(current.isna().sum())
 
-    # These are heuristic labels, not validated confidence thresholds.
     if outside_pct < 10:
         reliability = "Most features fall inside the DEAM range"
     elif outside_pct < 30:
@@ -987,7 +1328,6 @@ def predict_emotion(filepath):
     )
 
     prediction = assets["model"].predict(assets["imputer"].transform(X))[0]
-
     values = dict(zip(assets["target_columns"], prediction))
     valence = float(np.clip(values["valence_mean"], 1, 9))
     arousal = float(np.clip(values["arousal_mean"], 1, 9))
@@ -1025,20 +1365,15 @@ def measure_audio(filepath):
 
 
 def compute_intensity_events(y, sr, beat_times):
-    """Find relative high/low-intensity regions from the RMS envelope.
-
-    A region is 'peak' or 'low' when the smoothed RMS (dB) is more than 0.75
-    local standard deviations above/below its ~4-second rolling mean for at
-    least 0.5 seconds. These are relative loudness regions, not musical sections.
-    """
+    """Find relative high/low-intensity regions from the RMS envelope."""
     hop = 512
     fps = sr / hop
     rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+
     if len(rms) == 0:
         return [], []
 
     db = librosa.amplitude_to_db(rms, ref=max(float(rms.max()), 1e-9))
-    # Keep smoothing kernel no longer than the signal for very short clips.
     smooth = min(len(db), max(1, int(0.5 * fps)))
     env = np.convolve(db, np.ones(smooth) / smooth, mode="same")
 
@@ -1054,6 +1389,7 @@ def compute_intensity_events(y, sr, beat_times):
 
     events = []
     i = 0
+
     while i < len(state):
         j = i
         while j < len(state) and state[j] == state[i]:
@@ -1062,6 +1398,7 @@ def compute_intensity_events(y, sr, beat_times):
         if state[i] != 0 and (j - i) / fps >= 0.5:
             start, end = i / fps, j / fps
             nearest = None
+
             if len(beat_times):
                 nearest = round(float(beat_times[np.argmin(np.abs(beat_times - start))]), 2)
 
@@ -1082,7 +1419,7 @@ def compute_intensity_events(y, sr, beat_times):
 
 
 def beat_onset_agreement(y, sr, beat_times):
-    """Fraction of beats within 70 ms of an onset peak; consistency check only."""
+    """Consistency check: beats within 70 ms of an onset peak."""
     if not len(beat_times):
         return None
 
@@ -1090,6 +1427,7 @@ def beat_onset_agreement(y, sr, beat_times):
     onsets = librosa.onset.onset_detect(
         onset_envelope=onset_env, sr=sr, units="time"
     )
+
     if not len(onsets):
         return None
 
@@ -1145,16 +1483,16 @@ def analyse_audio(filepath):
         results["emotion_error"] = str(exc)
 
     return results
-
-
 def analyse_for_compare(filepath):
     _, _, _, m = measure_audio(filepath)
+
     try:
         emotion = predict_emotion(filepath)
         m["valence"], m["arousal"] = emotion["valence"], emotion["arousal"]
     except Exception:
         app.logger.exception("Emotion prediction unavailable (compare)")
         m["valence"] = m["arousal"] = None
+
     return m
 
 
@@ -1165,6 +1503,7 @@ def build_comparison(
     def change(x, y, digits):
         if x is None or y is None:
             return "n/a"
+
         diff = y - x
         pct = f" ({diff / x * 100:+.1f}%)" if x else ""
         return f"{diff:+.{digits}f}{pct}"
@@ -1181,9 +1520,11 @@ def build_comparison(
     ]
 
     rows = []
+
     for label, key, digits in spec:
         va, vb = a.get(key), b.get(key)
         fmt = lambda v: "n/a" if v is None else f"{v:.{digits}f}"
+
         rows.append({
             "label": label,
             "a": fmt(va),
@@ -1208,6 +1549,7 @@ def build_comparison(
     else:
         summary_label = "Revision check"
         test = INTENTS[intent][1]
+
         if test is None:
             check = "No revision goal selected - review the measured changes above."
         else:
@@ -1261,6 +1603,7 @@ def home():
             else:
                 stored_filename = f"{uuid.uuid4().hex[:12]}_{filename}"
                 filepath = UPLOAD_FOLDER / stored_filename
+
                 try:
                     uploaded.save(str(filepath))
                     results = analyse_audio(filepath)
@@ -1309,15 +1652,19 @@ def compare():
 
     if any(not f or not f.filename for f in files):
         return error("Please select both audio files.")
+
     if any(not allowed_file(f.filename) for f in files):
         return error("Only MP3 and WAV files are supported.")
+
     if any(file_too_big(f) for f in files):
         return error("Each file must be 20 MB or smaller.")
 
     try:
         measured = []
+
         for f in files:
             name = secure_filename(f.filename)
+
             if not name:
                 return error("Invalid filename.")
 
@@ -1329,6 +1676,7 @@ def compare():
             measured[0][0], measured[1][0], intent, compare_mode,
             measured[0][1], measured[1][1],
         )
+
         return page(
             comparison=comparison,
             compare_mode=compare_mode,
@@ -1351,4 +1699,4 @@ def file_too_large(error):
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False, host="127.0.0.1", port=5000)
